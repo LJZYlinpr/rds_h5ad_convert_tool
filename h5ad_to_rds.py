@@ -36,7 +36,7 @@ from scipy.io import mmwrite
 from rpy2 import robjects as ro
 
 
-SCRIPT_VERSION = "2026-05-04-tolerant-v3"
+SCRIPT_VERSION = "2026-06-08-tolerant-v4"
 
 
 def log(msg: str) -> None:
@@ -65,6 +65,11 @@ append_item <- function(x, value) {
   c(x, as.character(value))
 }
 
+report_append <- function(report, section, field, value) {
+  report[[section]][[field]] <- c(report[[section]][[field]], as.character(value))
+  report
+}
+
 read_lines_gz <- function(path) {
   readLines(gzfile(path), warn = FALSE)
 }
@@ -86,6 +91,10 @@ safe_layers <- function(obj, assay_name) {
 safe_reductions <- function(obj) {
   out <- tryCatch(SeuratObject::Reductions(obj), error = function(e) names(obj@reductions))
   unique(as.character(out))
+}
+
+read_sparse_mtx <- function(path) {
+  methods::as(Matrix::readMM(path), "CsparseMatrix")
 }
 
 inspect_rds <- function(input_file, assay_name = "") {
@@ -129,8 +138,7 @@ build_rds_from_bundle <- function(bundle_dir, output_file, assay_name = "RNA", p
   }
   if (is.null(counts_path) || !file.exists(counts_path)) stop("no usable matrix found in bundle for Seurat creation")
 
-  counts <- Matrix::readMM(counts_path)
-  counts <- methods::as(counts, "dgCMatrix")
+  counts <- read_sparse_mtx(counts_path)
   if (nrow(counts) != length(features) || ncol(counts) != length(cells)) {
     stop("core matrix dimension mismatch: ", paste(dim(counts), collapse = "x"), " vs ", length(features), "x", length(cells))
   }
@@ -160,7 +168,7 @@ build_rds_from_bundle <- function(bundle_dir, output_file, assay_name = "RNA", p
       }
       TRUE
     }, error = function(e) {
-      build_report$skipped$var_metadata <<- c(build_report$skipped$var_metadata, conditionMessage(e))
+      build_report <<- report_append(build_report, "skipped", "var_metadata", conditionMessage(e))
       FALSE
     })
   }
@@ -174,15 +182,14 @@ build_rds_from_bundle <- function(bundle_dir, output_file, assay_name = "RNA", p
         next
       }
       ok_layer <- tryCatch({
-        mat <- Matrix::readMM(layer_file)
-        mat <- methods::as(mat, "dgCMatrix")
+        mat <- read_sparse_mtx(layer_file)
         if (nrow(mat) != length(features) || ncol(mat) != length(cells)) stop("shape mismatch")
         rownames(mat) <- features
         colnames(mat) <- cells
         SeuratObject::LayerData(object = obj, assay = assay_name, layer = layer_name) <- mat
         TRUE
       }, error = function(e) {
-        build_report$skipped$layers <<- c(build_report$skipped$layers, paste0(layer_name, ": ", conditionMessage(e)))
+        build_report <<- report_append(build_report, "skipped", "layers", paste0(layer_name, ": ", conditionMessage(e)))
         FALSE
       })
       if (ok_layer) build_report$converted$layers <- c(build_report$converted$layers, layer_name)
@@ -224,7 +231,7 @@ build_rds_from_bundle <- function(bundle_dir, output_file, assay_name = "RNA", p
               if (ncol(full) == ncol(emb)) colnames(full) <- colnames(emb) else colnames(full) <- paste0(red_key, seq_len(ncol(full)))
               full
             }, error = function(e) {
-              build_report$skipped$loadings <<- c(build_report$skipped$loadings, paste0(red_name, ": ", conditionMessage(e)))
+              build_report <<- report_append(build_report, "skipped", "loadings", paste0(red_name, ": ", conditionMessage(e)))
               NULL
             })
           } else {
@@ -236,12 +243,12 @@ build_rds_from_bundle <- function(bundle_dir, output_file, assay_name = "RNA", p
           dr <- CreateDimReducObject(embeddings = emb, assay = assay_name, key = red_key)
         } else {
           dr <- CreateDimReducObject(embeddings = emb, loadings = loadings, assay = assay_name, key = red_key)
-          build_report$converted$loadings <<- c(build_report$converted$loadings, red_name)
+          build_report <<- report_append(build_report, "converted", "loadings", red_name)
         }
         obj[[red_name]] <- dr
         TRUE
       }, error = function(e) {
-        build_report$skipped$reductions <<- c(build_report$skipped$reductions, paste0(red_name, ": ", conditionMessage(e)))
+        build_report <<- report_append(build_report, "skipped", "reductions", paste0(red_name, ": ", conditionMessage(e)))
         FALSE
       })
 
@@ -255,7 +262,7 @@ build_rds_from_bundle <- function(bundle_dir, output_file, assay_name = "RNA", p
       if (length(lv) > 0) SeuratObject::Idents(obj) <- factor(obj$seurat_ident, levels = lv) else SeuratObject::Idents(obj) <- obj$seurat_ident
       TRUE
     }, error = function(e) {
-      build_report$skipped$idents <<- c(build_report$skipped$idents, conditionMessage(e))
+      build_report <<- report_append(build_report, "skipped", "idents", conditionMessage(e))
       FALSE
     })
     if (ok_id) build_report$converted$idents <- TRUE
@@ -277,7 +284,7 @@ build_rds_from_bundle <- function(bundle_dir, output_file, assay_name = "RNA", p
     }
     TRUE
   }, error = function(e) {
-    build_report$skipped$uns <<- c(build_report$skipped$uns, conditionMessage(e))
+    build_report <<- report_append(build_report, "skipped", "uns", conditionMessage(e))
     FALSE
   })
   if (ok_misc) build_report$converted$uns <- TRUE
@@ -432,7 +439,7 @@ def init_report(input_file: Path, output_file: Path, direction: str) -> dict[str
 def write_report(report: dict[str, Any], output_file: Path) -> Path:
     report["finished_at"] = datetime.now().isoformat(timespec="seconds")
     path = report_path_for(output_file)
-    path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(to_jsonable(report), indent=2, ensure_ascii=False), encoding="utf-8")
     return path
 
 
@@ -625,7 +632,7 @@ def h5ad_to_rds(
         manifest["notes"] = report["notes"]
         manifest["converted"] = report["converted"]
         manifest["skipped"] = report["skipped"]
-        (tmpdir_p / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        (tmpdir_p / "manifest.json").write_text(json.dumps(to_jsonable(manifest), indent=2, ensure_ascii=False), encoding="utf-8")
 
         log("3/5 build Seurat in embedded R")
         R_BUILD(str(tmpdir_p), str(output_file), assay_name, str(manifest["project"]))
