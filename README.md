@@ -25,5 +25,5 @@ python -m pip install ipykernel
 python -m ipykernel install --user --name rds_h5ad_env --display-name "Python (rds_h5ad_env)"
 
 # 如何使用
-python sc_convert.py /path/to/jiaData.rds --assay-name RNA
-python sc_convert.py /path/to/jiaData.h5ad --assay-name RNA
+python h5ad_to_rds.py input.h5ad --assay-name RNA
+python rds_to_h5ad.py input.rds --assay-name RNA
